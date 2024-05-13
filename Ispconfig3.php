@@ -1,748 +1,605 @@
 <?php
+
 /**
- * Copyright 2022-2023 FOSSBilling
+ * Copyright 2022-2024 FOSSBilling
  * Copyright 2011-2021 BoxBilling, Inc.
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: Apache-2.0.
  *
  * @copyright FOSSBilling (https://www.fossbilling.org)
- * @license http://www.apache.org/licenses/LICENSE-2.0 Apache-2.0
+ * @license   http://www.apache.org/licenses/LICENSE-2.0 Apache-2.0
  */
-
 class Server_Manager_Ispconfig3 extends Server_Manager
 {
+
     private $_session = null;
-    private ?\SoapClient $_c = null;
 
-	public function init()
+    public function __destruct()
     {
-        if(!extension_loaded('soap')) {
-            throw new Server_Exception('PHP Soap extension required for IspConfig server manager');
-        }
-	}
-
-    public function  __destruct()
-    {
-        if($this->_c instanceof SoapClient && $this->_session) {
-            $this->_request('logout');
-            unset($this->_c, $this->_session);
-        }
+        $this->request('logout', []);
+        unset($this->session);
     }
 
-    public static function getForm()
+    /**
+     * Returns server manager parameters.
+     *
+     * @return array returns an array with the label of the server manager
+     */
+    public static function getForm(): array
     {
-        return array(
-            'label'     =>  'ISPConfig 3',
-        );
+        return [
+            'label' => 'ISPConfig3',
+        ];
     }
 
-    public function getLoginUrl()
+    /**
+     * Returns the URL for account management.
+     *
+     * @param Server_Account|null $account the account for which the URL is generated
+     *
+     * @return string returns the URL as a string
+     */
+    public function getLoginUrl(Server_Account $account = null): string
     {
-        $host     = $this->_config['host'];
-        $port = '';
-        if (isset($this->_config['port'])) {
-            $port = ':'.$this->_config['port'];
-        }
-        return 'http://'.$host.$port;
+        $useSsl = $this->_config['secure'];
+        $host = $this->_config['host'];
+        $port = !empty($this->_config['port']) ? ':'.$this->_config['port'].'/' : '';
+        $host = ($useSsl) ? 'https://'.$host : 'http://'.$host;
+
+        return $host.$port;
     }
 
-    public function getResellerLoginUrl()
+    /**
+     * Returns the URL for reseller account management.
+     *
+     * @param Server_Account|null $account the account for which the URL is generated
+     *
+     * @return string returns the URL as a string
+     */
+    public function getResellerLoginUrl(Server_Account $account = null): string
     {
-        return $this->getLoginUrl();
+        $useSsl = $this->_config['secure'];
+        $host = $this->_config['host'];
+        $port = !empty($this->_config['port']) ? ':'.$this->_config['port'].'/' : '';
+        $host = ($useSsl) ? 'https://'.$host : 'http://'.$host;
+
+        return $host.$port;
     }
-    
-    public function testConnection()
+
+    /**
+     * Tests the connection to the server.
+     *
+     * @return bool returns true if the connection is successful
+     */
+    public function testConnection(): bool
     {
-        $this->_load();
+        $this->_loadConfigAndLogin();
+
         return true;
     }
-    
-    public function synchronizeAccount(Server_Account $a)
+
+    /**
+     * Synchronizes the account with the server.
+     *
+     * @param Server_Account $account the account to be synchronized
+     *
+     * @return Server_Account returns the synchronized account
+     */
+    public function synchronizeAccount(Server_Account $account): Server_Account
     {
         throw new Server_Exception(':type: does not support :action:', [':type:' => 'ISPConfig 3', ':action:' => __trans('account synchronization')]);
     }
 
-    public function createAccount(Server_Account $a)
+    /**
+     * Creates a new account on the server.
+     *
+     * @param Server_Account $account the account to be created
+     *
+     * @return bool returns true if the account is successfully created
+     */
+    public function createAccount(Server_Account $account)
     {
-        $ci = $this->getClient($a);
-		try {
-        	if (!$ci)
-        	{
-	            if ($a->getReseller())
-    	            $id = $this->createClient($a, 1);
-        	    else
-            	    $id = $this->createClient($a, 0);
-        	}
-	        else
-    	    {
-        	    $id = $ci['client_id'];
-        	}
+        $response = $this->getClientData($account);
 
-        	$client = $a->getClient();
-        	$client->setId($id);
-
-	        $this->createSite($a);
-        	$this->dnsCreateZone($a);
-		} catch (Exception $e) {
-			if (!str_contains(strtolower($e->getMessage()), strtolower('domain_error_unique'))) {
-				throw new Server_Exception($e->getMessage());
-			} else {
-				return true;
-			}
-		}
-        return true;
-    }
-
-    public function suspendAccount(Server_Account $a)
-    {
-        $params = array(
-            'primary_id' => $this->getSiteId($a)
-        );
-
-        $result = $this->_request('sites_web_domain_inactive', $params);
-
-        return (bool) $result;
-    }
-
-    public function unsuspendAccount(Server_Account $a)
-    {
-        $params = array(
-            'primary_id' => $this->getSiteId($a)
-        );
-
-        $result = $this->_request('sites_web_domain_active', $params);
-
-        return (bool) $result;
-    }
-
-    public function cancelAccount(Server_Account $a)
-    {
-        $pa = [];
-        $ci = $this->getClient($a);
-
-        $params = array(
-            'client_id' => $ci['client_id']
-        );
-
-        $result = $this->_request('client_delete', $params);
-		
-		$pa['origin'] = $a->getDomain();
-		$info = $this->_request('test', $pa);
-		
-		$this->_request('dns_zone_delete', $info);
-		$this->_request('sites_web_domain_delete', $info);
-
-        return (bool) $result;
-    }
-
-    public function changeAccountPackage(Server_Account $a, Server_Package $p)
-    {
-        $client     = $a->getClient();
-
-        $ci = $this->getClient($a);
-
-        $params = array(
-            'reseller_id' => 1,
-            'client_id' => $ci['client_id'],
-
-            'server_id'     => $this->getServerId(),
-            'company_name'  => $client->getCompany(),
-            'contact_name'  => $client->getFullName(),
-            'username'      => $a->getUsername(),
-            'password'      => $a->getPassword(),
-            
-            'language'      => $p->getCustomValue('languge'),
-            'usertheme'     => $p->getCustomValue('theme'),
-            
-            'street'        => $client->getStreet(),
-            'zip'           => $client->getZip(),
-            'city'          => $client->getCity(),
-            'state'         => $client->getState(),
-            'country'       => $client->getCountry(),
-            'telephone'     => $client->getTelephone(),
-            'mobile'        => $client->getTelephone(),
-            'fax'           => $client->getTelephone(),
-            'email'         => $client->getEmail(),
-            'internet'      => $client->getWww(),
-            'icq'           => '',
-            'notes'         => $a->getNote(),
-        );
-
-        $result = $this->_request('client_update', $params);
-
-        return (bool) $result;
-    }
-
-    public function changeAccountPassword(Server_Account $a, $new)
-    {
-        $ci = $this->getClient($a);
-
-        $params = array(
-            'client_id' => $ci['client_id'],
-            'password' => $new
-        );
-
-        $result = $this->_request('client_change_password', $params);
-
-        return (bool) $result;
-    }
-
-    public function changeAccountUsername(Server_Account $a, $new)
-    {
-        throw new Server_Exception(':type: does not support :action:', [':type:' => 'ISPConfig 3', ':action:' => __trans('username changes')]);
-    }
-    
-    public function changeAccountDomain(Server_Account $a, $new)
-    {
-        throw new Server_Exception(':type: does not support :action:', [':type:' => 'ISPConfig 3', ':action:' => __trans('changing the account domain')]);
-    }
-
-    public function changeAccountIp(Server_Account $a, $new)
-    {
-        throw new Server_Exception(':type: does not support :action:', [':type:' => 'ISPConfig 3', ':action:' => __trans('changing the account IP')]);
-    }
-    
-    private function createSite(Server_Account &$a)
-    {
-        $site_params = [];
-        if($this->isSiteCreated($a)) {
-            return true;
+        if ($account->getReseller()) {
+            $isReseller = 1;
+        } else {
+            $isReseller = 0;
         }
 
-        $client     = $a->getClient();
-        $package    = $a->getPackage();
-        $server     = $this->getServerInfo();
+        if(! $response['response']) {
+            $request = $this->createClient($account, $isReseller);
 
-        $site_params['client_id']       = $client->getId();
-        $site_params['domain']          = $a->getDomain();
-        $site_params['type'] 			= 'vhost';	// harcoded in ISPConfig vhost
-        $site_params['vhost_type'] 		= 'name';	// harcoded in ISPConfig vhost
+            $id = $request['response'];
+        } else {
+            $id = $response['response'];
+        }
 
-        $site_params['client_group_id'] = $client->getid() + 1;	 //always will be this 	groupd id + 1
-        $site_params['server_id'] 		= $this->getServerId();
+        $client = $account->getClient();
+        $client->setId($id);
 
-        //Set the defaults
-        $site_params['hd_quota'] 		= $package->getQuota();
-        $site_params['traffic_quota'] 	= $package->getBandwidth();
-
-        //Hardcoded values
-        $site_params['allow_override'] 	= 'All';
-        $site_params['errordocs'] 		= 1;
-
-        $site_params['document_root'] 	 = $server['website_path'];
-        $site_params['php_open_basedir'] = $server['php_open_basedir'];
-
-        //PHP Configuration
-        $site_params['php'] 			= 'suphp'; //php available posible values
-        $site_params['ip_address'] 		= '*'; //important
-        $site_params['active']          = 'y';
-		$site_params['pm_process_idle_timeout'] ='30';
-		$site_params['pm_max_requests'] ='30';
-
-        //Creating a site
-        $result = $this->_request('sites_web_domain_add', $site_params);
-        return $result;
-    }
-
-    private function dnsCreateZone(Server_Account &$a)
-    {
-        $dns_domain_params = [];
-        $pa = [];
-        $dns_a_params = [];
-        $mail_domain_params = [];
-        $client     = $a->getClient();
-		
-
-		// ---- Setting up the DNS ZONE
-        $dns_domain_params['server_id'] = $this->getServerId();
-        $dns_domain_params['client_id'] = $client->getid();
-		$dns_domain_params['origin']	= $a->getDomain().'.';
-		$dns_domain_params['ns']	  = $a->getNs1();
-        $dns_domain_params['zone'] = $client->getid();
-        $dns_domain_params['name'] = $a->getDomain().'.'; //adding a final dot
-        $dns_domain_params['type'] = 'A';
-        $dns_domain_params['data'] = $a->getIp();
-		$dns_domain_params['mbox'] 		= 'mail.'.$a->getDomain().'.';//@todo
-        $dns_domain_params['refresh'] 	= '7200';
-        $dns_domain_params['retry'] 	= '540';
-        $dns_domain_params['expire']	= '604800';
-        $dns_domain_params['minimum']	= '86400';
-        $dns_domain_params['ttl'] = '3600';
-        $dns_domain_params['active'] = 'Y';
-        $this->_request('dns_zone_add', $dns_domain_params);
-		
-		$pa['origin'] = $a->getDomain();
-		$info = $this->_request('test', $pa);
-		
-        //Adding the DNS record A
-        $dns_a_params['server_id'] = $this->getServerId();
-        $dns_a_params['client_id'] = $client->getid();
-        $dns_a_params['zone'] = $info;
-        $dns_a_params['name'] = $a->getDomain().'.'; //adding a final dot
-        $dns_a_params['type'] = 'A';
-        $dns_a_params['data'] = $a->getIp();
-        $dns_a_params['ttl'] = '3600';
-        $dns_a_params['active'] = 'Y';
-
-        $this->_request('dns_a_add', $dns_a_params);
-		
-		//Adding the DNS record A
-        $dns_a_params['server_id'] = $this->getServerId();
-        $dns_a_params['client_id'] = $client->getid();
-        $dns_a_params['zone'] = $info;
-        $dns_a_params['name'] = 'www'; //adding a final dot
-        $dns_a_params['type'] = 'A';
-        $dns_a_params['data'] = $a->getIp();
-        $dns_a_params['ttl'] = '3600';
-        $dns_a_params['active'] = 'Y';
-
-        $this->_request('dns_a_add', $dns_a_params);
-		
-		//Adding the DNS record A
-        $dns_a_params['server_id'] = $this->getServerId();
-        $dns_a_params['client_id'] = $client->getid();
-        $dns_a_params['zone'] = $info;
-        $dns_a_params['name'] = 'mail'; //adding a final dot
-        $dns_a_params['type'] = 'A';
-        $dns_a_params['data'] = $a->getIp();
-        $dns_a_params['ttl'] = '3600';
-        $dns_a_params['active'] = 'Y';
-
-        $this->_request('dns_a_add', $dns_a_params);
-		
-		//Adding the DNS record NS1
-		$dns_ns_add = array(
-			'server_id' => $this->getServerId(),
-			'zone' => $info,
-			'name' => $a->getDomain().'.',
-			'type' => 'ns',
-			'data' => $a->getNs1().'.',
-			'aux' => '0',
-			'ttl' => '86400',
-			'active' => 'Y',
-			'stamp' => 'CURRENT_TIMESTAMP',
-			'serial' => '1',
-			'client_id' => $client->getId(),
-			);
-
-        $this->_request('dns_ns_add', $dns_ns_add);
-		
-		//Adding the DNS record NS2
-		$dns_ns_add = array(
-			'server_id' => $this->getServerId(),
-			'zone' => $info,
-			'name' => $a->getDomain().'.',
-			'type' => 'ns',
-			'data' => $a->getNs2().'.',
-			'aux' => '0',
-			'ttl' => '3600',
-			'active' => 'Y',
-			'stamp' => 'CURRENT_TIMESTAMP',
-			'serial' => '1',
-			'client_id' => $client->getId(),
-			);
-
-        $this->_request('dns_ns_add', $dns_ns_add);
-		
-		
-      /*  $dns_a_params['server_id'] = $this->getServerId();
-        $dns_a_params['client_id'] = $client->getid();
-		$dns_a_params['origin']	= $a->getDomain();
-		$dns_a_params['ns']	  = $a->getNs1();
-        $dns_a_params['zone'] = '90';
-        $dns_a_params['name'] = $a->getDomain().'.'; //adding a final dot
-        $dns_a_params['type'] = 'A';
-        $dns_a_params['data'] = $a->getIp();
-		$dns_a_params['mbox'] 		= 'mail.'.$a->getDomain().'.';//@todo
-        $dns_a_params['refresh'] 	= '28800';
-        $dns_a_params['retry'] 	= '7200';
-        $dns_a_params['expire']	= '86400';
-        $dns_a_params['minimum']	= '86400';
-        $dns_a_params['ttl'] = '86400';
-        $dns_a_params['active'] = 'Y';
-
-        $this->_request('dns_zone_add', $dns_a_params);  */
-		
-		
-        
-        // ---- Setting up the mail domain
-        $mail_domain_params['client_id'] 	= $client->getId();
-        $mail_domain_params['server_id']  	= $this->getServerId();
-        $mail_domain_params['domain']	 	= $a->getDomain();
-        $mail_domain_params['active'] 	 	= 'y';
-
-        $this->_request('mail_domain_add', $mail_domain_params);
-        
-
-        return true;
+        $this->createSite($account);
+        $this->createDNSZone($account);
     }
 
     /**
-     * @param integer $type
+     * Suspends an account on the server.
+     *
+     * @param Server_Account $account the account to be suspended
+     *
+     * @return bool returns true if the account is successfully suspended
      */
-    private function createClient(Server_Account &$a, $type)
+    public function suspendAccount(Server_Account $account)
     {
-        $client     = $a->getClient();
-        $p          = $a->getPackage();
-        $params = array(
-            'server_id' => $this->getServerId(),
-            'company_name' => $client->getCompany(),
-            'contact_name' => $client->getFullName(),
-            'username' =>$a->getUsername(),
-            'password' =>$a->getPassword(),
-            'language'      => $p->getCustomValue('languge'),
-            'usertheme'     => $p->getCustomValue('theme'),
-            'street' =>$client->getStreet(),
-            'zip' =>$client->getZip(),
-            'city' =>$client->getCity(),
-            'state' =>$client->getState(),
-            'country' =>$client->getCountry(),
-            'telephone' =>$client->getTelephone(),
-            'mobile' =>$client->getTelephone(),
-            'fax' =>$client->getTelephone(),
-            'email' =>$client->getEmail(),
-            'internet' =>$client->getWww(),
-            'icq' =>'',
-            'notes' =>$a->getNote(),
+        $response = $this->request('sites_web_domain_set_status', [
+            'primary_id' => $this->getPrimaryId($account),
+            'status' => 'inactive'
+        ]);
 
-            'template_master' => '0',
-            'template_additional' =>'',
+        return $response['response'];
+    }
 
-            'default_mailserver' =>'1',
-            'limit_maildomain' =>'1',
-            'limit_mailbox' =>'-1',
-            'limit_mailalias' =>'-1',
-            'limit_mailforward' =>'-1',
-            'limit_mailcatchall' =>'-1',
-            'limit_mailrouting' => '-1',
-            'limit_mailfilter' =>'-1',
-            'limit_fetchmail' =>'-1',
-            'limit_mailquota' =>'-1',
-            'limit_spamfilter_wblist' =>'-1',
-            'limit_spamfilter_user' =>'-1',
-            'limit_spamfilter_policy' =>'-1',
+    /**
+     * Unsuspends an account on the server.
+     *
+     * @param Server_Account $account the account to be unsuspended
+     *
+     * @return bool returns true if the account is successfully unsuspended
+     */
+    public function unsuspendAccount(Server_Account $account): bool
+    {
+        $response = $this->request('sites_web_domain_set_status', [
+            'primary_id' => $this->getPrimaryId($account),
+            'status' => 'active'
+        ]);
 
-            'default_webserver' =>'1',
-            'limit_web_domain' =>'-1',
-            'web_php_options' =>"SuPHP",
-            'limit_web_aliasdomain' =>'-1',
-            'limit_web_subdomain' =>'-1',
-            'limit_ftp_user' =>'-1',
-            'limit_shell_user' =>'-1',
-            'ssh_chroot' =>'None',
+        return $response['response'];
+    }
 
-            'default_dnsserver' =>'1',
-            'limit_dns_zone' =>'-1',
-            'limit_dns_record' =>'-1',
-            'limit_client' => $type,
+    /**
+     * Cancels an account on the server.
+     *
+     * @param Server_Account $account the account to be cancelled
+     *
+     * @return bool returns true if the account is successfully cancelled
+     */
+    public function cancelAccount(Server_Account $account): bool
+    {
+        $client = $this->getClientData($account);
 
-            'default_dbserver' =>'1',
-            'limit_database' =>'-1',
-            'limit_cron' =>'0',
-            'limit_cron_type' =>'',
-            'limit_cron_frequency' =>'-1',
+        $response = $this->request('client_delete_everything', [
+            'client_id' => $client['response']['client_id']
+        ]);
+
+        return $response['response'];
+    }
+
+    /**
+     * Changes the package of an account on the server.
+     *
+     * @param Server_Account $account the account for which the package is to be changed
+     * @param Server_Package $package the new package
+     *
+     * @return bool returns true if the package is successfully changed
+     */
+    public function changeAccountPackage(Server_Account $account, Server_Package $package): bool
+    {
+        throw new Server_Exception(':type: does not support :action:', [':type:' => 'ISPConfig 3', ':action:' => __trans('changing the account IP')]);
+
+    }
+
+    /**
+     * Changes the username of an account on the server.
+     *
+     * @param Server_Account $account     the account for which the username is to be changed
+     * @param string         $newUsername the new username
+     *
+     * @return bool returns true if the username is successfully changed
+     */
+    public function changeAccountUsername(Server_Account $account, string $newUsername): bool
+    {
+        throw new Server_Exception(':type: does not support :action:', [':type:' => 'ISPConfig 3', ':action:' => __trans('username changes')]);
+
+    }
+
+    /**
+     * Changes the domain of an account on the server.
+     *
+     * @param Server_Account $account   the account for which the domain is to be changed
+     * @param string         $newDomain the new domain
+     *
+     * @return bool returns true if the domain is successfully changed
+     */
+    public function changeAccountDomain(Server_Account $account, string $newDomain): bool
+    {
+        throw new Server_Exception(':type: does not support :action:', [':type:' => 'ISPConfig 3', ':action:' => __trans('changing the account domain')]);
+
+    }
+
+    /**
+     * Changes the password of an account on the server.
+     *
+     * @param Server_Account $account     the account for which the password is to be changed
+     * @param string         $newPassword the new password
+     *
+     * @return bool returns true if the password is successfully changed
+     */
+    public function changeAccountPassword(Server_Account $account, string $newPassword): bool
+    {
+        $client = $this->getClientData($account);
+
+        $response = $this->request('client_change_password', [
+            'client_id' => $client['response']['client_id'],
+            'password' => $newPassword
+        ]);
+
+        return $response['response'];
+    }
+
+    /**
+     * Changes the IP of an account on the server.
+     *
+     * @param Server_Account $account the account for which the IP is to be changed
+     * @param string         $newIp   the new IP
+     *
+     * @return bool returns true if the IP is successfully changed
+     */
+    public function changeAccountIp(Server_Account $account, string $newIp): bool
+    {
+        throw new Server_Exception(':type: does not support :action:', [':type:' => 'ISPConfig 3', ':action:' => __trans('changing the account IP')]);
+    }
+
+    /**
+     * Private Functions
+     */
+
+    private function createClient(Server_Account $account, int $isReseller)
+    {
+        $client  = $account->getClient();
+        $package = $account->getPackage();
+
+        // Will need to sort through this, see what exactly we need.
+        $payload = [
+            'params' => [
+                'server_id' => 1,
+                'company_name' => $client->getCompany(),
+                'contact_name' => $client->getFullName(),
+                'vat_id' => $package->getCustomValue('vat_id'),
+                'street' => $client->getStreet(),
+                'zip' => $client->getZip(),
+                'city' => $client->getCity(),
+                'state' => $client->getState(),
+                'country' => $client->getCountry(),
+                'telephone' => $client->getTelephone(),
+                'mobile' => $client->getTelephone(),
+                'fax' => $client->getTelephone(),
+                'email' => $client->getEmail(),
+                'internet' => $client->getWww(),
+                'icq' => '',
+                'notes' => $account->getNote(),
+                'default_mailserver' => 1,
+                'limit_maildomain' => -1,
+                'limit_mailbox' => -1,
+                'limit_mailalias' => -1,
+                'limit_mailaliasdomain' => -1,
+                'limit_mailforward' => -1,
+                'limit_mailcatchall' => -1,
+                'limit_mailrouting' => 0,
+                'limit_mail_wblist' => 0,
+                'limit_mailfilter' => -1,
+                'limit_fetchmail' => -1,
+                'limit_mailquota' => -1,
+                'limit_spamfilter_wblist' => 0,
+                'limit_spamfilter_user' => 0,
+                'limit_spamfilter_policy' => 1,
+                'default_webserver' => 1,
+                'limit_web_ip' => '',
+                'limit_web_domain' => -1,
+                'limit_web_quota' => -1,
+                'web_php_options' => $package->getCustomValue('web_php_options') ?? 'no,fast-cgi,cgi,mod,suphp,php-fpm',
+                'limit_web_subdomain' => -1,
+                'limit_web_aliasdomain' => -1,
+                'limit_ftp_user' => -1,
+                'limit_shell_user' => $package->getCustomValue('limit_shell_user') ?? 1,
+                'ssh_chroot' => $package->getCustomValue('ssh_chroot') ?? 'no,jailkit,ssh-chroot',
+                'limit_webdav_user' => 0,
+                'default_dnsserver' => 1,
+                'limit_dns_zone' => -1,
+                'limit_dns_slave_zone' => -1,
+                'limit_dns_record' => -1,
+                'default_dbserver' => 1,
+                'limit_database' => -1,
+                'limit_cron' => 0,
+                'limit_cron_type' => 'url',
+                'limit_cron_frequency' => 5,
+                'limit_traffic_quota' => -1,
+                'limit_client' => 0, // If this value is > 0, then the client is a reseller
+                'parent_client_id' => 0,
+                'username' => $account->getUsername(),
+                'password' => $account->getPassword(),
+                'language' => $package->getCustomValue('language') ?? 'en',
+                'usertheme' => 'default',
+                'template_master' => 0,
+                'template_additional' => '',
+                'created_at' => 0
+            ]
+        ];
+
+        $response = $this->request('client_add', $payload);
+
+        return $response;
+    }
+
+
+    private function createSite(Server_Account $account)
+    {
+        //@TODO Check if site is already created.
+        //@TODO Check these settings and see if we need to provide a custom input for them in the plan details.
+
+        $client = $account->getClient();
+        $package = $account->getPackage();
+
+        $payload = [
+            'params' => [
+            'client_id' => $client->getId(),
+            'domain' => $account->getDomain(),
+            'type' => 'vhost',
+            'vhost_type' => 'name',
+
+            'client_group_id' => $client->getId() + 1,
+            'server_id' => 1,
+
+            'hd_quota' => $package->getQuota(),
+            'traffic_quota' => $package->getBandwidth(),
+            'traffic_quota_lock' => 'y',
+
+            'allow_override' => 'ALL',
+            'errordocs' => 1,
+
+
+            'is_subdomainwww' => 1,
+            'subdomain' => 'none',
+
+            'php' => 'y',
+            'cgi' => 'y',
+
+            'php' => 'php-fpm',
+            'ip_address' => '*',
+            'active' => 'y',
+
+            'ssl' => 'y',
+
+
+            'pm' => 'ondemand',
+            'pm_process_idle_timeout' => 30,
+            'pm_max_requests' => 30,
+
+            'http_port' => '80',
+            'https_port' => '443'
+            ]
+        ];
+
+
+        $response = $this->request('sites_web_domain_add', $payload);
+
+        return $response;
+    }
+
+    private function createDNSZone(Server_Account $account)
+    {
+        $client = $account->getClient();
+
+        // Setup DNSZone
+        $zone = $this->request(
+            'dns_zone_add',
+            [
+            'client_id' => $client->getId(),
+            'params' => [
+                'server_id' => 1,
+                'origin' => $account->getDomain(),
+                'ns' => $account->getNs1(),
+                'zone' => $client->getId(),
+                'name' => $account->getDomain(),
+                'type' => 'A',
+                'data' => $account->getIp(),
+                'mbox' => 'mail.'.$account->getDomain().'.',
+                'refresh' => '7200',
+                'retry' => '540',
+                'expire' => '604800',
+                'minimum' => '86400',
+                'ttl' => '3600',
+                'active' => 'y'
+            ]
+        ]
         );
-        $action = 'client_add';
-        $result = $this->_request($action, $params);
 
-        return $result;
+        $zoneId = $zone['response']; // Grab the zone ID to add the other records
+
+        //Adding the DNS record A
+        $testing = $this->request('dns_a_add', [
+           'client_id' => $client->getid(),
+           'params' => [
+               'server_id' => 1,
+               'zone' => $zoneId,
+               'name' => $account->getDomain().'.',
+               'type' => 'A',
+               'data' => $account->getIp(),
+               'ttl' => '3600',
+               'active' => 'y',
+               'stamp' => date('Y-m-d H:i:s')
+               ]
+           ]);
+
+
+        //Adding the DNS record A
+        $this->request('dns_a_add', [
+           'client_id' => $client->getid(),
+           'params' => [
+               'server_id' => 1,
+               'zone' => $zoneId,
+               'name' => 'www',
+               'type' => 'A',
+               'data' => $account->getIp(),
+               'ttl' => '3600',
+               'active' => 'y',
+           ]
+           ]);
+
+        //Adding the DNS record A
+        $this->request('dns_a_add', [
+        'client_id' => $client->getid(),
+        'params' => [
+        'server_id' => 1,
+        'zone' => $zoneId,
+        'name' => 'mail',
+        'type' => 'A',
+        'data' => $account->getIp(),
+        'ttl' => '3600',
+        'active' => 'y',
+        'stamp' => date('Y-m-d H:i:s')
+        ]
+        ]);
+
+
+        //Adding the DNS record NS1
+        $this->request('dns_ns_add', [
+           'client_id' => $client->getid(),
+           'params' => [
+            'server_id' => 1,
+            'zone' => $zoneId,
+            'name' => $account->getDomain().'.',
+            'type' => 'ns',
+            'data' => $account->getNs1().'.',
+            'aux' => '0',
+            'ttl' => '86400',
+            'active' => 'Y',
+            'stamp' => date('Y-m-d H:i:s'),
+            'serial' => '1',
+            ]
+           ]);
+
+
+        //Adding the DNS record NS1
+        $this->request('dns_ns_add', [
+           'client_id' => $client->getid(),
+           'params' => [
+            'server_id' => 1,
+            'zone' => $zoneId,
+            'name' => $account->getDomain().'.',
+            'type' => 'ns',
+            'data' => $account->getNs2().'.',
+            'aux' => '0',
+            'ttl' => '86400',
+            'active' => 'Y',
+            'stamp' => date('Y-m-d H:i:s'),
+            'serial' => '1',
+            ]
+           ]);
+
+        $this->request('mail_domain_add', [
+           'client_id' => $client->getId(),
+           'server_id' => 1,
+           'domain' => $account->getDomain(),
+           'active' => 'y'
+        ]);
     }
 
-    private function getClient(Server_Account $a)
+    private function getPrimaryId(Server_Account $account)
     {
-		$params = [];
-  $params['username'] = $a->getUsername();
-        $result = $this->_request('client_get_by_username',$params);
-        return $result;
-    }
+        $sites = $this->getClientSites($account);
 
-    private function isSiteCreated(Server_Account $a)
-    {
-        $sites = $this->getClientSites($a);
-        if (is_array($sites) ) {
-            foreach($sites as $key=>$domain) {
-                if ($a->getDomain() == $domain['domain']) {
-                    $my_domain = $domain;
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private function getClientSites(Server_Account $a)
-    {
-        $site_params = [];
-        $user_info = $this->getClient($a);
-        $site_params['sys_userid']	= $user_info['userid'];
-        $site_params['groups'] 		= $user_info['groups'];
-
-        $site_info = $this->_request('client_get_sites_by_user', $site_params);
-        return $site_info;
-    }
-
-
-    private function getSiteId(Server_Account $a)
-    {
-        $sites = $this->getClientSites($a);
-        if (is_array($sites) ) {
-            foreach($sites as $key=>$domain) {
-                if ($a->getDomain() == $domain['domain']) {
+        if (is_array($sites['response'])) {
+            foreach($sites['response'] as $key=>$domain) {
+                if($account->getDomain() == $domain['domain']) {
                     return $domain['domain_id'];
                 }
             }
         }
+
         return false;
     }
 
-    private function getSiteInfo(Server_Account $a)
+    private function getClientSites(Server_Account $account)
     {
-        $server_params = [];
-        $section = null;
-        $server_params['server_id'] 	= $this->getServerId();
-        $server_params['section'] 		= $section;
-        return $this->_request('server_get',$server_params);
+        $client = $this->getClientData($account);
+
+        $response = $this->request('client_get_sites_by_user', [
+            'sys_userid' => $client['response']['userid'],
+            'sys_groupid' => $client['response']['groups']
+        ]);
+
+        return $response;
     }
 
-    private function getServerInfo($section = 'web')
+
+    private function getClientData(Server_Account $account)
     {
-        $server_params = [];
-        $server_params['server_id'] 	= $this->getServerId();
-        $server_params['section'] 		= $section;
-        return $this->_request('server_get',$server_params);
+        $response = $this->request('client_get_by_username', [
+            'username' => $account->getUsername()
+        ]);
+
+        return $response;
     }
 
-    private function getServerId()
-    {
-        return 1;
-//        return $this->_config['server_id'];
-    }
 
-    private function _load()
+    private function request($action, $data)
     {
-        $usessl   = $this->_config['secure'];
-        $host     = $this->_config['host'];
+        $useSsl = $this->_config['secure'];
+        $host = $this->_config['host'];
         $username = $this->_config['username'];
         $password = $this->_config['password'];
         $port = !empty($this->_config['port']) ? ':'.$this->_config['port'].'/' : '';
-        $host = ($usessl) ? 'https://'.$host : 'http://'.$host;
-        $soap_location = $host.$port.'remote/index.php';
-        $soap_uri = $host.$port.'remote/';
+        $host = ($useSsl) ? 'https://'.$host : 'http://'.$host;
+        $restUrl = $host.$port.'remote/json.php';
 
-        if(!$this->_c instanceof SoapClient ) {
-            // Create the SOAP Client
-            $this->_c = new SoapClient(null, array('location' => $soap_location,
-                                                 'uri'      => $soap_uri,
-												 'trace' => 1,
-									 'exceptions' => 1));
+        if(is_null($this->_session)) {
+            $this->_loadConfigAndLogin();
         }
 
-        //* Login to the remote server
-        if($this->_session === null) {
-            try {
-                $this->_session = $this->_c->login($username, $password);
-            } catch(Exception $e) {
-                throw new Server_Exception($e->getMessage(), [], $e->getCode());
-            }
-        }
+        $client = $this->getHttpClient()->withOptions([
+            'verify_peer' => false,
+            'verify_host' => false,
+            'timeout' => 60,
+        ]);
 
-        if(!$this->_c instanceof SoapClient) {
-            throw new Server_Exception('Could not load Soap client');
-        }
-        if(!$this->_session) {
-            throw new Server_Exception('Could not retrieve session');
-        }
+        $payload = array_merge(['session_id' => $this->_session], $data);
 
-        return $this;
+        $response = $client->request('POST', $restUrl .'?'. $action, [
+            'json' => $payload
+        ]);
+
+        return json_decode($response->getContent(), true);
+
+
     }
 
-    /**
-     * @param string $action
-     */
-    private function _request($action, $params = array())
+
+    private function _loadConfigAndLogin()
     {
-		$this->getLog()->debug(sprintf('ISP Config 3 action "%s" called with params: "%s" ', $action, print_r($params,1)));
+        $useSsl                                      = $this->_config['secure'];
+        $host          = $this->_config['host'];
+        $username      = $this->_config['username'];
+        $password      = $this->_config['password'];
+        $port          = !empty($this->_config['port']) ? ':'.$this->_config['port'].'/' : '';
+        $host          = ($useSsl) ? 'https://'.$host : 'http://'.$host;
+        $restUrl       = $host.$port.'remote/json.php';
 
-		$this->_load();
-        $soap_client = $this->_c;
+        $client = $this->getHttpClient()->withOptions([
+            'verify_peer' => false,
+            'verify_host' => false,
+            'timeout' => 60,
+        ]);
 
-        try {
-            switch($action) {
-                case 'client_add':
-                    $reseller_id = 1;
-                    $soap_result	= $soap_client->client_add($this->_session, $reseller_id, $params);
-                break;
-                case 'client_get':
-                    $soap_result 	= $soap_client->client_get($this->_session, $params['client_id']);
-                break;
-                case 'client_get_by_username':
-                    $soap_result 	= $soap_client->client_get_by_username($this->_session, $params['username']);
-                break;
-                case 'client_get_sites_by_user':
-                    $soap_result 	= $soap_client->client_get_sites_by_user($this->_session, $params['sys_userid'], $params['groups']);
-                break;
-                case 'client_delete':
-                    $soap_result 	= $soap_client->client_delete($this->_session, $params['client_id']);
-                break;
-                case 'client_update':
-                    $soap_result 	= $soap_client->client_update($this->_session, $params['client_id'], $params['reseller_id'], $params);
-                break;
-                case 'client_change_password':
-                    $soap_result 	= $soap_client->client_change_password($this->_session, $params['client_id'], $params['password']);
-                break;
-                case 'sites_cron_add':
-                    //$soap_result = $soap_client->sites_cron_add($this->_session, $reseller_id, $site);
-                break;
-                case 'sites_web_domain_update':
-                    $client_id 		= $params['client_id']; // client id
-                    $primary_id		= $params['primary_id']; //site id
-                    $params['client_id'] = $params['primary_id'] = null;
-                    $soap_result 	= $soap_client->sites_web_domain_update($this->_session, $client_id, $primary_id, $params);
-                break;
-                case 'sites_web_domain_active':
-                    $primary_id		= $params['primary_id']; //site id
-                    $soap_result 	= $soap_client->sites_web_domain_set_status($this->_session, $primary_id, 'active');
-                break;
-                case 'sites_web_domain_inactive':
-                    $primary_id		= $params['primary_id']; //site id
-                    $soap_result 	= $soap_client->sites_web_domain_set_status($this->_session, $primary_id,'inactive');
-                break;
-                case 'sites_web_domain_add':
-                    $client_id = $params['client_id'];
-                    $params['client_id'] = null;
-                    $soap_result 	= $soap_client->sites_web_domain_add($this->_session, $client_id  , $params);
-                break;
-                /*
-                 * I believe this is an old version of what we see on line 590
-                 * Commenting out just incase we need it for anything, but it's unreachable as-is
-                 * So this makes it a little more obvious 
-                case 'sites_web_domain_update':
-                    $client_id = $params['client_id'];
-                    $params['client_id'] = null;
-                    $soap_result 	= $soap_client->sites_web_domain_update($this->_session, $client_id  , $params);
-                break;
-                */
-                case 'sites_web_subdomain_add':
-                    $client_id = $params['client_id'];
-                    $params['client_id'] = null;
-                    $soap_result 	= $soap_client->sites_web_subdomain_add($this->_session, $client_id  , $params);
-                break;
-                //Get domain info
-                case 'sites_web_domain_get':
-                    $soap_result 	= $soap_client->sites_web_domain_get($this->_session, $params['primary_id']);
-                break;
-                //Get server info
-                case 'server_get':
-                    $soap_result 	= $soap_client->server_get($this->_session, $params['server_id'], $params['section']);//Section Could be 'web', 'dns', 'mail', 'dns', 'cron', etc
-                break;
-                //Adds a DNS zone
-                case 'dns_zone_add':
-                    $client_id 		= $params['client_id']; // client id
-                    $params['client_id'] = null;
-                    $soap_result 	= $soap_client->dns_zone_add($this->_session, $client_id, $params);
-                break;
-                case 'dns_zone_get':
-                    $soap_result 	= $soap_client->dns_zone_get($this->_session, $client_id, $params);
-                break;
-                case 'dns_zone_get_by_user':
-                    $client_id 		= $params['client_id']; // client id
-                    $soap_result 	= $soap_client->dns_zone_get_by_user($this->_session, $client_id, $params);
-                break;
-                case 'dns_zone_update':
-                    /*$client_id 		= $params['client_id']; // client id
-                    $primary_id		= $params['primary_id']; // client id
-                    $params['client_id'] = null;
-                    $params['primary_id'] = null;
-                    $soap_result 	= $soap_client->dns_zone_update($this->_session, $client_id, $primary_id, $params);*/
-                break;
-                case 'dns_zone_inactive':
-                    $primary_id		= $params['primary_id']; // client id
-                    $soap_result 	= $soap_client->dns_zone_set_status($this->_session, $primary_id, 'inactive');
-                break;
-                case 'dns_zone_active':
-                    $primary_id		= $params['primary_id']; // client id
-                    $soap_result 	= $soap_client->dns_zone_set_status($this->_session, $primary_id, 'active');
-                break;
+        $response = $client->request('POST', $restUrl .'?login', [
+            'json' => [ 'username' => $username, 'password' => $password ]
+        ]);
 
-                case 'dns_a_add':
-                    $client_id		= $params['client_id']; // client id
-                    $soap_result 	= $soap_client->dns_a_add($this->_session, $client_id, $params);
-                break;
+        $body = json_decode($response->getContent(), true);
 
-                case 'mail_domain_add':
-                    $client_id 		= $params['client_id']; // client id
-                    $params['client_id'] = null;
-                    $soap_result 	= $soap_client->mail_domain_add($this->_session, $client_id, $params);
-                break;
-                //Add an email domain
-                case 'mail_domain_update':
-                    $client_id 		= $params['client_id']; // client id
-                    $params['client_id'] = null;
-                    $soap_result 	= $soap_client->mail_domain_update($this->_session, $client_id, $params);
-                break;
-                //Change domain status
-                case 'mail_domain_active':
-                    $primary_id 		= $params['primary_id'];
-                    $soap_result 	= $soap_client->mail_domain_set_status($this->_session, $primary_id, 'active');
-                break;
-                //Change domain status
-                case 'mail_domain_inactive':
-                    $primary_id 		= $params['primary_id'];
-                    $soap_result 	= $soap_client->mail_domain_set_status($this->_session, $primary_id, 'inactive');
-                break;
-                case 'mail_domain_get_by_domain':
-                    $domain		= $params['domain'];
-                    $soap_result 	= $soap_client->mail_domain_get_by_domain($this->_session, $domain);
-                break;
-                //Creates a mySQL database
-                case 'sites_database_add':
-                    $client_id 		= $params['client_id']; // client id
-                    $params['client_id'] = null;
-                    $soap_result 	= $soap_client->sites_database_add($this->_session, $client_id, $params);
-                break;
-                case 'sites_database_get':
-                    $client_id 		= $params['client_id']; // client id
-                    $params['client_id'] = null;
-                    $soap_result 	= $soap_client->sites_database_get($this->_session, $client_id, $params);
-                break;
-                case 'sites_database_get_all_by_user':
-                    $client_id 		= $params['client_id']; // client id
-                    $params['client_id'] = null;
-                    $soap_result 	= $soap_client->sites_database_get_all_by_user($this->_session, $client_id, $params);
-                break;
-                case 'install_chamilo':
-                    $client_id 		= $params['client_id']; // client id
-                    $params['client_id'] = null;
-                    $soap_result 	= $soap_client->install_chamilo($this->_session, $client_id, $params);
-                break;
-                case 'client_templates_get_all':
-                    $soap_result 	= $soap_client->client_templates_get_all($this->_session);
-                break;
-				case 'test' :
-                    $soap_result 	= $soap_client->dns_zone_get_id($this->_session, $params['origin']);
-                break;
-				case 'dns_ns_add' :
-					$soap_result    = $soap_client->dns_ns_add($this->_session,$params['client_id'], $params);
-				break;
-				case 'dns_zone_delete' :
-					$soap_result    = $soap_client->dns_zone_delete($this->_session, $params);
-				break;
-                case 'logout' :
-                    $soap_result 	= $soap_client->logout($this->_session);
-                break;
+        $this->_session = $body['response'];
 
-                default:
 
-                break;
-            }
-        } catch (SoapFault $e) {
-            throw new Server_Exception($e->getMessage(), [], $e->getCode());
-        }
-
-        if(isset($soap_result)){
-            return $soap_result;
-        } else {
-            $placeholders = ['action' => $action, 'type' => 'ISPConfig 3'];
-            throw new Server_Exception('Failed to :action: on the :type: server, check the error logs for further details', $placeholders);
+        if (! $this->_session) {
+            throw new Server_Exception('Failed to login and gain a Session Token.');
         }
     }
 }
