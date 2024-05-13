@@ -57,12 +57,7 @@ class Server_Manager_Ispconfig3 extends Server_Manager
      */
     public function getResellerLoginUrl(Server_Account $account = null): string
     {
-        $useSsl = $this->_config['secure'];
-        $host = $this->_config['host'];
-        $port = !empty($this->_config['port']) ? ':'.$this->_config['port'].'/' : '';
-        $host = ($useSsl) ? 'https://'.$host : 'http://'.$host;
-
-        return $host.$port;
+        return $this->getLoginUrl();
     }
 
     /**
