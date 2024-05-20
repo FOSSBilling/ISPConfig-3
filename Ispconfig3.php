@@ -252,7 +252,10 @@ class Server_Manager_Ispconfig3 extends Server_Manager
         $client  = $account->getClient();
         $package = $account->getPackage();
 
-        // Will need to sort through this, see what exactly we need.
+        /**
+         * These are defaults from the docs, if there are anything that needs to be configured
+         * with template values, please let me know.
+         */
         $payload = [
             'params' => [
                 'server_id' => 1,
@@ -327,8 +330,10 @@ class Server_Manager_Ispconfig3 extends Server_Manager
 
     private function createSite(Server_Account $account)
     {
-        //@TODO Check if site is already created.
-        //@TODO Check these settings and see if we need to provide a custom input for them in the plan details.
+        // Does the site already exist?
+        if($this->isSiteAlreadyCreated($account)) {
+            return true;
+        }
 
         $client = $account->getClient();
         $package = $account->getPackage();
@@ -365,8 +370,8 @@ class Server_Manager_Ispconfig3 extends Server_Manager
 
 
             'pm' => 'ondemand',
-            'pm_process_idle_timeout' => 30,
-            'pm_max_requests' => 30,
+            'pm_process_idle_timeout' => $package->getCustomValue('pm_process_idle_timeout') ?? 30,
+            'pm_max_requests' => $package->getCustomValue('pm_max_requests') ?? 30,
 
             'http_port' => '80',
             'https_port' => '443'
@@ -510,6 +515,19 @@ class Server_Manager_Ispconfig3 extends Server_Manager
             }
         }
 
+        return false;
+    }
+
+    private function isSiteAlreadyCreated(Server_Account $account)
+    {
+        $sites = $this->getClientSites($account);
+        if (is_array($sites['response'])) {
+            foreach($clientSites['response'] as $key=>$domain) {
+                if($account->getDomain() == $domain['domain']) {
+                    return true;
+                }
+            }
+        }
         return false;
     }
 

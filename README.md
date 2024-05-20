@@ -14,3 +14,5 @@ This server manager has been re-written using the RESTful API.  This is a commun
 - limit_shell_user - Default: 1
 - ssh_chroot - Default: no,jailkit,ssh-chroot
 - language - Default: en
+- pm_process_idle_timeout - Default: 30
+- pm_max_requests - Default: 30
